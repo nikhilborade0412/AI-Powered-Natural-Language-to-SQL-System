@@ -362,12 +362,12 @@ def main():
     with open("test_results.json", "w") as f:
         json.dump(json_output, f, indent=2)
     print("\n✅ Results saved to test_results.json")
-
+    
     # Save RESULTS.md
     md = generate_results_md(results, passed, total)
-    with open("RESULTS.md", "w") as f:
+    with open("RESULTS.md", "w") as f:  # <-- THIS LINE IS WRONG
         f.write(md)
-    print("✅ Results saved to RESULTS.md")
+    print("Results saved to RESULTS.md")
 
 
 if __name__ == "__main__":
