@@ -1,0 +1,54 @@
+# 🔹 Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 🔹 Virtual Environment
+yenv/
+venv/
+env/
+
+# 🔹 Environment variables (IMPORTANT)
+.env
+
+# 🔹 Database files (optional - better to exclude large data)
+*.db
+*.sqlite3
+
+# 🔹 Logs
+*.log
+
+# 🔹 OS files
+.DS_Store
+Thumbs.db
+
+# 🔹 VS Code settings (optional)
+.vscode/
+
+# 🔹 Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# 🔹 Test output files
+test_results.json
+
+# 🔹 Temporary files
+*.tmp
+*.bak
+
+# 🔹 Python build files
+build/
+dist/
+*.egg-info/
+
+# 🔹 Coverage reports
+.coverage
+htmlcov/
+
+# 🔹 Pytest cache
+.pytest_cache/
+
+# 🔹 Mypy cache
+.mypy_cache/
+
+# 🔹 Plotly temp files (if any)
+*.html

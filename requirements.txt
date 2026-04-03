@@ -1,0 +1,18 @@
+# Vanna 2.0 — AI agent framework for NL2SQL
+vanna>=2.0.0
+
+# FastAPI and ASGI server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# Data handling
+pandas>=2.0.0
+
+# Chart generation
+plotly>=5.18.0
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# Google Gemini — use the modern SDK (replaces deprecated google-generativeai)
+google-genai>=1.0.0
