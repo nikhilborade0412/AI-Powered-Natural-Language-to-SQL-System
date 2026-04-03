@@ -363,9 +363,9 @@ def main():
         json.dump(json_output, f, indent=2)
     print("\n✅ Results saved to test_results.json")
     
-    # Save RESULTS.md
+    # Save RESULTS.md with UTF-8 encoding to handle emojis
     md = generate_results_md(results, passed, total)
-    with open("RESULTS.md", "w") as f:  # <-- THIS LINE IS WRONG
+    with open("RESULTS.md", "w", encoding="utf-8") as f:  # <-- FIXED
         f.write(md)
     print("Results saved to RESULTS.md")
 
