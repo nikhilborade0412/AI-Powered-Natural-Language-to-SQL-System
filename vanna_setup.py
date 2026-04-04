@@ -1,15 +1,5 @@
-"""
-vanna_setup.py
+## vanna_setup.py
 
-Vanna 2.0 Agent initialization for the NL2SQL Clinic system.
-Uses Google Gemini via the modern google-genai SDK.
-
-Fixes applied:
-  - Comprehensive seed examples covering all 20 test questions
-  - Improved memory search using TF-IDF-like scoring
-  - Better prompt engineering with schema + examples
-  - Fallback only uses memory when question is very similar (threshold)
-"""
 
 import os
 import re
@@ -56,6 +46,29 @@ Key relationships:
   - To link doctors to invoices: doctors -> appointments -> patients -> invoices
   - To link doctors to treatments: doctors -> appointments -> treatments
 """
+
+# ---------------------------------------------------------------------------
+# FIX 1: Move these constants to TOP — before the class that uses them
+# ---------------------------------------------------------------------------
+
+OUT_OF_SCOPE_KEYWORDS = [
+    "dead", "died", "death", "deceased", "mortality", "killed",
+    "alive", "survive", "survival", "covid", "disease outbreak",
+    "weather", "stock", "price", "news", "politics", "sports",
+    "salary", "employee", "staff", "hr", "payroll",
+    "inventory", "supply", "product", "order", "shipping",
+    "password", "login", "user", "admin", "security",
+]
+
+IN_SCOPE_KEYWORDS = [
+    "patient", "patients", "doctor", "doctors", "appointment", "appointments",
+    "treatment", "treatments", "invoice", "invoices", "revenue", "cost",
+    "specialization", "department", "city", "spending", "visit", "visits",
+    "cancelled", "completed", "scheduled", "no-show", "pending", "overdue",
+    "paid", "unpaid", "duration", "count", "total", "average", "list",
+    "show", "how many", "which", "top", "busiest", "trend", "monthly",
+    "registered", "gender", "age", "phone", "email", "name",
+]
 
 # ---------------------------------------------------------------------------
 # Comprehensive seed examples — covers all 20 test scenarios
@@ -293,12 +306,11 @@ class SQLValidator:
 
 
 # ---------------------------------------------------------------------------
-# Improved Memory Store with better matching
+# Improved Memory Store
 # ---------------------------------------------------------------------------
 class SimpleMemoryStore:
     """In-memory store with improved similarity scoring."""
 
-    # Words to ignore during matching
     STOP_WORDS = {
         "the", "a", "an", "is", "are", "was", "were", "do", "does", "did",
         "have", "has", "had", "be", "been", "being", "will", "would", "could",
@@ -321,20 +333,17 @@ class SimpleMemoryStore:
         self.qa_pairs: List[Dict[str, str]] = []
 
     def add(self, question: str, sql: str) -> None:
-        # Avoid exact duplicates
         for pair in self.qa_pairs:
             if pair["question"].lower().strip() == question.lower().strip():
-                pair["sql"] = sql  # Update existing
+                pair["sql"] = sql
                 return
         self.qa_pairs.append({"question": question, "sql": sql})
 
     def _tokenize(self, text: str) -> List[str]:
-        """Extract meaningful tokens from text."""
         words = re.findall(r'[a-z0-9]+', text.lower())
         return [w for w in words if w not in self.STOP_WORDS and len(w) > 1]
 
     def search(self, question: str, limit: int = 5) -> List[Dict[str, str]]:
-        """Return closest matches using improved scoring."""
         q_tokens = self._tokenize(question)
         if not q_tokens:
             return self.qa_pairs[:limit]
@@ -345,8 +354,6 @@ class SimpleMemoryStore:
         for pair in self.qa_pairs:
             p_tokens = self._tokenize(pair["question"])
             p_counter = Counter(p_tokens)
-
-            # Compute cosine-like similarity
             common = set(q_counter.keys()) & set(p_counter.keys())
             if not common:
                 continue
@@ -365,7 +372,6 @@ class SimpleMemoryStore:
         return [p for _, p in scored[:limit]]
 
     def search_best(self, question: str, threshold: float = 0.6) -> Optional[Dict[str, str]]:
-        """Return the single best match only if similarity exceeds threshold."""
         q_tokens = self._tokenize(question)
         if not q_tokens:
             return None
@@ -377,7 +383,6 @@ class SimpleMemoryStore:
         for pair in self.qa_pairs:
             p_tokens = self._tokenize(pair["question"])
             p_counter = Counter(p_tokens)
-
             common = set(q_counter.keys()) & set(p_counter.keys())
             if not common:
                 continue
@@ -403,12 +408,10 @@ class SimpleMemoryStore:
 
 
 # ---------------------------------------------------------------------------
-# Vanna Agent
+# FIX 2: VannaAgent — all methods correctly indented INSIDE the class
 # ---------------------------------------------------------------------------
 class VannaAgent:
-    """
-    NL2SQL agent backed by Google Gemini and improved memory.
-    """
+    """NL2SQL agent backed by Google Gemini and improved memory."""
 
     _SYSTEM = f"""You are an expert SQL assistant for a clinic management system using SQLite.
 
@@ -436,23 +439,26 @@ STRICT RULES — follow every single one:
 19. Read the question carefully. Generate SQL that EXACTLY answers THAT question, not a different one.
 20. If reference examples are provided below, use them as guidance but adapt to the actual question asked."""
 
+    # ------------------------------------------------------------------ #
+    # Init                                                                 #
+    # ------------------------------------------------------------------ #
     def __init__(self, db_path: str = DATABASE_PATH):
         self.db_path = db_path
         self.memory = SimpleMemoryStore()
         self._client = None
         self._init_llm()
 
-        # Pre-load comprehensive seed examples
         for ex in SEED_EXAMPLES:
             self.memory.add(ex["question"], ex["sql"])
 
+    # ------------------------------------------------------------------ #
+    # LLM setup                                                            #
+    # ------------------------------------------------------------------ #
     def _init_llm(self) -> None:
-        """Initialise the Gemini client."""
         api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not api_key:
             print("Warning: No GOOGLE_API_KEY found. LLM disabled, memory-only mode.")
             return
-
         try:
             from google import genai
             self._client = genai.Client(api_key=api_key)
@@ -462,17 +468,17 @@ STRICT RULES — follow every single one:
         except Exception as exc:
             print(f"Warning: Gemini init failed: {exc}")
 
+    # ------------------------------------------------------------------ #
+    # Prompt builder                                                        #
+    # ------------------------------------------------------------------ #
     def _build_prompt(self, question: str) -> str:
-        """Build the user prompt with relevant examples."""
         similar = self.memory.search(question, limit=5)
-
         parts = [
             f"Question: {question}",
             "",
             "Generate a single SQLite SELECT query that answers this question.",
             "",
         ]
-
         if similar:
             parts.append("Here are some similar example queries for reference:")
             parts.append("")
@@ -481,15 +487,15 @@ STRICT RULES — follow every single one:
                 parts.append(f"  Q: {pair['question']}")
                 parts.append(f"  SQL: {pair['sql']}")
                 parts.append("")
-
         parts.append("Now generate the SQL for the question above. Output ONLY the SQL, nothing else.")
         return "\n".join(parts)
 
+    # ------------------------------------------------------------------ #
+    # LLM call                                                             #
+    # ------------------------------------------------------------------ #
     def _call_llm(self, question: str) -> Optional[str]:
-        """Call Gemini and return cleaned SQL string."""
         if not self._client:
             return None
-
         try:
             from google.genai import types as genai_types
 
@@ -498,24 +504,25 @@ STRICT RULES — follow every single one:
                 contents=self._build_prompt(question),
                 config=genai_types.GenerateContentConfig(
                     system_instruction=self._SYSTEM,
-                    temperature=0.0,  # Deterministic
+                    temperature=0.0,
                     max_output_tokens=1024,
                 ),
             )
 
             raw = response.text.strip()
-            # Strip markdown code fences
             raw = re.sub(r"^```(?:sql)?\s*", "", raw, flags=re.IGNORECASE)
             raw = re.sub(r"\s*```$", "", raw)
             raw = raw.strip()
 
-            # Remove any leading explanation text before SELECT/WITH
+            # Strip any explanation text before SELECT/WITH
             lines = raw.split('\n')
             sql_lines = []
             found_sql = False
             for line in lines:
-                if not found_sql and (line.strip().upper().startswith('SELECT') or
-                                      line.strip().upper().startswith('WITH')):
+                if not found_sql and (
+                    line.strip().upper().startswith('SELECT') or
+                    line.strip().upper().startswith('WITH')
+                ):
                     found_sql = True
                 if found_sql:
                     sql_lines.append(line)
@@ -528,28 +535,21 @@ STRICT RULES — follow every single one:
             print(f"LLM error: {exc}")
             return None
 
+    # ------------------------------------------------------------------ #
+    # SQL generation with fallback                                         #
+    # ------------------------------------------------------------------ #
     def generate_sql(self, question: str) -> Optional[str]:
-        """
-        Generate SQL for a natural language question.
-        
-        Strategy:
-        1. Try LLM first (best results)
-        2. If LLM fails, fall back to best memory match (only if very similar)
-        """
-        # Try LLM
         sql = self._call_llm(question)
         if sql:
             valid, _ = SQLValidator.validate(sql)
             if valid:
                 return sql
 
-        # Memory fallback — only use if very similar question exists
         best = self.memory.search_best(question, threshold=0.7)
         if best:
             print(f"  [memory fallback] Using cached SQL for: {best['question'][:50]}")
             return best["sql"]
 
-        # Last resort — return top memory match
         similar = self.memory.search(question, limit=1)
         if similar:
             print(f"  [memory fallback] Best available: {similar[0]['question'][:50]}")
@@ -557,12 +557,13 @@ STRICT RULES — follow every single one:
 
         return None
 
+    # ------------------------------------------------------------------ #
+    # SQL execution                                                         #
+    # ------------------------------------------------------------------ #
     def execute_sql(self, sql: str) -> Dict[str, Any]:
-        """Validate and execute SQL."""
         is_valid, error = SQLValidator.validate(sql)
         if not is_valid:
             return {"error": error, "columns": [], "rows": [], "row_count": 0}
-
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.execute(sql)
@@ -573,8 +574,73 @@ STRICT RULES — follow every single one:
         except Exception as exc:
             return {"error": str(exc), "columns": [], "rows": [], "row_count": 0}
 
+    # ------------------------------------------------------------------ #
+    # FIX 3: Out-of-scope check — correctly indented inside class         #
+    # ------------------------------------------------------------------ #
+    def _is_out_of_scope(self, question: str) -> tuple:
+        """Check if the question is outside the clinic database scope."""
+        q_lower = question.lower().strip()
+
+        for keyword in OUT_OF_SCOPE_KEYWORDS:
+            if keyword in q_lower:
+                return True, (
+                    f"This question contains '{keyword}' which is outside the "
+                    f"scope of the clinic database. The database contains: "
+                    f"patients, doctors, appointments, treatments, and invoices."
+                )
+
+        has_clinic_keyword = any(kw in q_lower for kw in IN_SCOPE_KEYWORDS)
+        if not has_clinic_keyword:
+            return True, (
+                "This question doesn't appear to be related to clinic data. "
+                "You can ask about patients, doctors, appointments, treatments, "
+                "and invoices."
+            )
+
+        return False, ""
+
+    # ------------------------------------------------------------------ #
+    # FIX 4: SQL relevance check — correctly indented inside class        #
+    # ------------------------------------------------------------------ #
+    def _validate_sql_relevance(self, question: str, sql: str) -> tuple:
+        """Check if the generated SQL actually matches the question intent."""
+        q_lower = question.lower()
+        sql_lower = sql.lower()
+
+        relevance_rules = [
+            ("dead",           None,              "Database has no mortality data"),
+            ("died",           None,              "Database has no mortality data"),
+            ("deceased",       None,              "Database has no deceased patient records"),
+            ("doctor",         "doctors",         "Query about doctors must reference the doctors table"),
+            ("appointment",    "appointments",    "Query about appointments must reference appointments table"),
+            ("treatment",      "treatments",      "Query about treatments must reference treatments table"),
+            ("invoice",        "invoices",        "Query about invoices must reference invoices table"),
+            ("revenue",        "invoices",        "Revenue queries must reference the invoices table"),
+            ("specialization", "specialization",  "Query must reference specialization column"),
+            ("duration",       "duration_minutes","Query must reference duration_minutes column"),
+            ("city",           "city",            "Query must reference city column"),
+            ("registered",     "registered_date", "Query must reference registered_date column"),
+            ("department",     "department",      "Query must reference department column"),
+            ("cancelled",      "cancelled",       "Query must filter by cancelled status"),
+            ("overdue",        "overdue",         "Query must filter by overdue status"),
+            ("pending",        "pending",         "Query must filter by pending status"),
+            ("no-show",        "no-show",         "Query must filter by no-show status"),
+        ]
+
+        for q_kw, sql_kw, error_msg in relevance_rules:
+            if q_kw in q_lower:
+                if sql_kw is None:
+                    return False, error_msg
+                if sql_kw not in sql_lower:
+                    return False, f"SQL mismatch: {error_msg}"
+
+        return True, ""
+
+    # ------------------------------------------------------------------ #
+    # FIX 5: ask() — correctly indented inside class                      #
+    # ------------------------------------------------------------------ #
     def ask(self, question: str) -> Dict[str, Any]:
-        """End-to-end: question -> SQL -> execute -> response."""
+        """End-to-end: question -> scope check -> SQL -> validate -> execute -> response."""
         result: Dict[str, Any] = {
             "question": question,
             "sql_query": None,
@@ -585,7 +651,14 @@ STRICT RULES — follow every single one:
             "error": None,
         }
 
-        # 1. Generate SQL
+        # Step 1: Out-of-scope check
+        out_of_scope, scope_reason = self._is_out_of_scope(question)
+        if out_of_scope:
+            result["error"] = "out_of_scope"
+            result["message"] = f"I cannot answer this question. {scope_reason}"
+            return result
+
+        # Step 2: Generate SQL
         sql = self.generate_sql(question)
         if not sql:
             result["error"] = "Could not generate SQL for this question"
@@ -594,14 +667,24 @@ STRICT RULES — follow every single one:
 
         result["sql_query"] = sql
 
-        # 2. Validate
+        # Step 3: Validate SQL safety
         is_valid, err = SQLValidator.validate(sql)
         if not is_valid:
             result["error"] = err
             result["message"] = f"The generated query was blocked: {err}"
             return result
 
-        # 3. Execute
+        # Step 4: Validate SQL relevance
+        is_relevant, relevance_err = self._validate_sql_relevance(question, sql)
+        if not is_relevant:
+            result["error"] = "irrelevant_sql"
+            result["message"] = (
+                f"I cannot answer this question with the available clinic data. "
+                f"Reason: {relevance_err}"
+            )
+            return result
+
+        # Step 5: Execute
         exec_result = self.execute_sql(sql)
         if exec_result.get("error"):
             result["error"] = exec_result["error"]
@@ -612,7 +695,7 @@ STRICT RULES — follow every single one:
         result["rows"] = exec_result["rows"]
         result["row_count"] = exec_result["row_count"]
 
-        # 4. Summary message
+        # Step 6: Summary message
         rc = result["row_count"]
         if rc == 0:
             result["message"] = "No data found for your query."
@@ -621,11 +704,14 @@ STRICT RULES — follow every single one:
         else:
             result["message"] = f"Found {rc} result(s)."
 
-        # 5. Save successful query to memory
+        # Step 7: Save to memory
         self.memory.add(question, sql)
 
         return result
 
+    # ------------------------------------------------------------------ #
+    # Public helpers                                                        #
+    # ------------------------------------------------------------------ #
     def add_training_data(self, question: str, sql: str) -> None:
         self.memory.add(question, sql)
 
@@ -663,6 +749,8 @@ if __name__ == "__main__":
         "Which doctor has the most appointments?",
         "Show me appointments for last month",
         "Average treatment cost by specialization",
+        "how many patients are dead?",       # should be blocked
+        "what is the weather today?",        # should be blocked
     ]
 
     for q in test_questions:
