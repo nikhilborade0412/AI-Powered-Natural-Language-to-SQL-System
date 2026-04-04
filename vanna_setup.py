@@ -1,4 +1,5 @@
-## vanna_setup.py
+"""
+vanna_setup.py
 
 Vanna 2.0 Agent — NL2SQL for Clinic Management System
 Uses Google Gemini via google-genai SDK.
@@ -6,7 +7,6 @@ Uses Google Gemini via google-genai SDK.
 
 import os
 import re
-
 import math
 import sqlite3
 from collections import Counter
@@ -64,25 +64,19 @@ Fields NOT in the database (answer "not available" for these):
 # Strictly non-clinic topics only — do NOT block clinic-related words
 # ---------------------------------------------------------------------------
 
-# Questions that are completely outside clinic domain
 OUT_OF_SCOPE_PATTERNS = [
-    # Death / mortality (not tracked in this DB)
     r"\b(dead|died|death|deceased|mortality|killed|fatality|fatalities)\b",
-    # External world topics
     r"\b(weather|temperature|forecast|climate)\b",
     r"\b(stock|bitcoin|crypto|cryptocurrency|forex|share price)\b",
     r"\b(news|politics|election|government|president|minister)\b",
     r"\b(sports|cricket|football|soccer|tennis|ipl|match|score)\b",
     r"\b(movie|film|actor|actress|celebrity|entertainment)\b",
-    # HR / non-clinic business
     r"\b(salary|payroll|tax|hr department|human resource)\b",
     r"\b(inventory|warehouse|supply chain|logistics|shipping)\b",
-    # Security
     r"\b(password|login|hack|breach|vulnerability|exploit)\b",
     r"\b(covid|pandemic|epidemic|outbreak|virus|infection)\b",
 ]
 
-# Fields that look clinic-related but are NOT in this database
 NOT_IN_DATABASE_PATTERNS = [
     (r"\b(blood type|blood group)\b",
      "Blood type/group is not stored in this clinic database."),
@@ -107,31 +101,22 @@ NOT_IN_DATABASE_PATTERNS = [
      "Cause of death is not tracked in this clinic database."),
 ]
 
-# Keywords that confirm a question IS about clinic data
 IN_SCOPE_KEYWORDS = [
-    # Core entities
     "patient", "patients", "doctor", "doctors", "appointment", "appointments",
     "treatment", "treatments", "invoice", "invoices",
-    # Financial
     "revenue", "cost", "spending", "amount", "paid", "unpaid", "payment",
     "billing", "bill", "fees", "fee", "overdue", "pending",
-    # Doctor attributes
     "specialization", "specialisation", "department", "specialist",
     "dermatology", "cardiology", "orthopedics", "pediatrics", "general",
-    # Patient attributes
     "city", "gender", "male", "female", "registered", "registration",
     "phone", "email", "name", "date of birth", "dob",
-    # Appointment attributes
     "scheduled", "completed", "cancelled", "canceled", "no-show", "noshow",
     "duration", "visit", "visits", "checkup", "check-up",
-    # Time-based
     "monthly", "month", "weekly", "week", "daily", "day", "trend",
     "last month", "last quarter", "past", "history", "recent",
-    # Aggregation intent
     "how many", "count", "total", "average", "avg", "top", "most",
     "least", "busiest", "highest", "lowest", "maximum", "minimum",
     "percentage", "percent", "ratio", "breakdown", "distribution",
-    # Action words specific to data
     "list", "show", "compare", "find", "which", "what",
 ]
 
@@ -536,10 +521,6 @@ class SimpleMemoryStore:
             if pair["question"].lower().strip() == question.lower().strip():
                 pair["sql"] = sql
                 return
-        for pair in self.qa_pairs:
-            if pair["question"].lower().strip() == question.lower().strip():
-                pair["sql"] = sql
-                return
         self.qa_pairs.append({"question": question, "sql": sql})
 
     def _tokenize(self, text: str) -> List[str]:
@@ -581,13 +562,11 @@ class SimpleMemoryStore:
 
 
 # ---------------------------------------------------------------------------
-# FIX 2: VannaAgent — all methods correctly indented INSIDE the class
+# VannaAgent
 # ---------------------------------------------------------------------------
 class VannaAgent:
     """NL2SQL agent backed by Google Gemini and improved memory."""
-    """NL2SQL agent backed by Google Gemini and improved memory."""
 
-    _SYSTEM = f"""You are an expert SQL assistant for a clinic management system using SQLite.
     _SYSTEM = f"""You are an expert SQL assistant for a clinic management system using SQLite.
 
 {SCHEMA_CONTEXT}
@@ -636,12 +615,9 @@ STRICT RULES:
             from google import genai
             self._client = genai.Client(api_key=api_key)
             print("Gemini LLM initialized successfully")
-            print("Gemini LLM initialized successfully")
         except ImportError:
             print("Warning: google-genai not installed. Run: pip install google-genai")
-            print("Warning: google-genai not installed. Run: pip install google-genai")
         except Exception as exc:
-            print(f"Warning: Gemini init failed: {exc}")
             print(f"Warning: Gemini init failed: {exc}")
 
     # ------------------------------------------------------------------ #
@@ -681,8 +657,6 @@ STRICT RULES:
                     system_instruction=self._SYSTEM,
                     temperature=0.0,
                     max_output_tokens=1024,
-                    temperature=0.0,
-                    max_output_tokens=1024,
                 ),
             )
             raw = response.text.strip()
@@ -717,9 +691,6 @@ STRICT RULES:
         # 1. Try LLM
         sql = self._call_llm(question)
         if sql:
-            valid, _ = SQLValidator.validate(sql)
-            if valid:
-                return sql
             valid, _ = SQLValidator.validate(sql)
             if valid:
                 return sql
@@ -803,9 +774,7 @@ STRICT RULES:
         q_lower = question.lower()
         sql_lower = sql.lower()
 
-        # These are hard rules — if question has keyword, SQL must have table/column
         strict_rules = [
-            # (question_keyword, required_in_sql, error_description)
             ("appointment",    "appointments",     "appointments table"),
             ("treatment",      "treatments",       "treatments table"),
             ("invoice",        "invoices",         "invoices table"),
@@ -875,7 +844,6 @@ STRICT RULES:
             return result
 
         # Step 5: Execute
-        # Step 5: Execute
         exec_result = self.execute_sql(sql)
         if exec_result.get("error"):
             result["error"] = exec_result["error"]
@@ -928,32 +896,30 @@ agent = get_agent()
 
 # ---------------------------------------------------------------------------
 # Smoke test
-# Smoke test
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("\n-- VannaAgent smoke test --")
     print("\n-- VannaAgent smoke test --")
     a = get_agent()
 
     tests = [
         # Should PASS (in database)
-        ("How many patients do we have?",           True),
-        ("How many doctors are there?",             True),
-        ("How many appointments do we have?",       True),
-        ("List all doctors",                        True),
-        ("What is the total revenue?",              True),
-        ("Which doctor has the most appointments?", True),
-        ("Show me appointments for last month",     True),
-        ("Average treatment cost by specialization",True),
-        ("Show unpaid invoices",                    True),
+        ("How many patients do we have?",            True),
+        ("How many doctors are there?",              True),
+        ("How many appointments do we have?",        True),
+        ("List all doctors",                         True),
+        ("What is the total revenue?",               True),
+        ("Which doctor has the most appointments?",  True),
+        ("Show me appointments for last month",      True),
+        ("Average treatment cost by specialization", True),
+        ("Show unpaid invoices",                     True),
         # Should BLOCK (out of scope)
-        ("how many patients are dead?",             False),
-        ("what is the weather today?",              False),
-        ("show me stock prices",                    False),
+        ("how many patients are dead?",              False),
+        ("what is the weather today?",               False),
+        ("show me stock prices",                     False),
         # Should BLOCK (not in database)
-        ("what is the blood type of patients?",     False),
-        ("show patient insurance details",          False),
-        ("what medications are prescribed?",        False),
+        ("what is the blood type of patients?",      False),
+        ("show patient insurance details",           False),
+        ("what medications are prescribed?",         False),
     ]
 
     passed = 0
