@@ -1,12 +1,16 @@
 ## vanna_setup.py
 
+Vanna 2.0 Agent — NL2SQL for Clinic Management System
+Uses Google Gemini via google-genai SDK.
+"""
 
 import os
 import re
+
 import math
 import sqlite3
 from collections import Counter
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from dotenv import load_dotenv
 
@@ -15,7 +19,7 @@ load_dotenv()
 DATABASE_PATH = os.getenv("DB_PATH", "clinic.db")
 
 # ---------------------------------------------------------------------------
-# Database schema — injected into every LLM prompt
+# Database schema
 # ---------------------------------------------------------------------------
 SCHEMA_CONTEXT = """
 Tables in the clinic SQLite database:
@@ -45,43 +49,116 @@ Key relationships:
   - patients.id = invoices.patient_id
   - To link doctors to invoices: doctors -> appointments -> patients -> invoices
   - To link doctors to treatments: doctors -> appointments -> treatments
+
+Fields NOT in the database (answer "not available" for these):
+  - patient blood type, weight, height, BMI
+  - patient insurance, insurance number
+  - patient diagnosis, medical history, prescription
+  - doctor salary, doctor rating, doctor experience
+  - appointment room number, hospital bed
+  - cause of death, mortality, deceased status
 """
 
 # ---------------------------------------------------------------------------
-# FIX 1: Move these constants to TOP — before the class that uses them
+# Out-of-scope detection
+# Strictly non-clinic topics only — do NOT block clinic-related words
 # ---------------------------------------------------------------------------
 
-OUT_OF_SCOPE_KEYWORDS = [
-    "dead", "died", "death", "deceased", "mortality", "killed",
-    "alive", "survive", "survival", "covid", "disease outbreak",
-    "weather", "stock", "price", "news", "politics", "sports",
-    "salary", "employee", "staff", "hr", "payroll",
-    "inventory", "supply", "product", "order", "shipping",
-    "password", "login", "user", "admin", "security",
+# Questions that are completely outside clinic domain
+OUT_OF_SCOPE_PATTERNS = [
+    # Death / mortality (not tracked in this DB)
+    r"\b(dead|died|death|deceased|mortality|killed|fatality|fatalities)\b",
+    # External world topics
+    r"\b(weather|temperature|forecast|climate)\b",
+    r"\b(stock|bitcoin|crypto|cryptocurrency|forex|share price)\b",
+    r"\b(news|politics|election|government|president|minister)\b",
+    r"\b(sports|cricket|football|soccer|tennis|ipl|match|score)\b",
+    r"\b(movie|film|actor|actress|celebrity|entertainment)\b",
+    # HR / non-clinic business
+    r"\b(salary|payroll|tax|hr department|human resource)\b",
+    r"\b(inventory|warehouse|supply chain|logistics|shipping)\b",
+    # Security
+    r"\b(password|login|hack|breach|vulnerability|exploit)\b",
+    r"\b(covid|pandemic|epidemic|outbreak|virus|infection)\b",
 ]
 
+# Fields that look clinic-related but are NOT in this database
+NOT_IN_DATABASE_PATTERNS = [
+    (r"\b(blood type|blood group)\b",
+     "Blood type/group is not stored in this clinic database."),
+    (r"\b(weight|height|bmi|body mass)\b",
+     "Patient weight/height/BMI is not stored in this clinic database."),
+    (r"\b(insurance|insurance number|policy)\b",
+     "Insurance information is not stored in this clinic database."),
+    (r"\b(diagnosis|diagnos[ie]s|medical history|prescription|medicine|drug|medication)\b",
+     "Diagnosis and prescription data is not stored in this clinic database."),
+    (r"\b(salary|earning|wage)\b",
+     "Doctor/staff salary data is not stored in this clinic database."),
+    (r"\b(rating|review|feedback|score)\b",
+     "Doctor ratings/reviews are not stored in this clinic database."),
+    (r"\b(room|bed|ward|floor|building)\b",
+     "Room/ward/bed information is not stored in this clinic database."),
+    (r"\b(dead|died|death|deceased|mortality|killed)\b",
+     "Mortality/death records are not stored in this clinic database. "
+     "The database only tracks active patient appointments and invoices."),
+    (r"\b(alive|survival|survive)\b",
+     "Survival/mortality data is not tracked in this clinic database."),
+    (r"\b(age of death|cause of death)\b",
+     "Cause of death is not tracked in this clinic database."),
+]
+
+# Keywords that confirm a question IS about clinic data
 IN_SCOPE_KEYWORDS = [
+    # Core entities
     "patient", "patients", "doctor", "doctors", "appointment", "appointments",
-    "treatment", "treatments", "invoice", "invoices", "revenue", "cost",
-    "specialization", "department", "city", "spending", "visit", "visits",
-    "cancelled", "completed", "scheduled", "no-show", "pending", "overdue",
-    "paid", "unpaid", "duration", "count", "total", "average", "list",
-    "show", "how many", "which", "top", "busiest", "trend", "monthly",
-    "registered", "gender", "age", "phone", "email", "name",
+    "treatment", "treatments", "invoice", "invoices",
+    # Financial
+    "revenue", "cost", "spending", "amount", "paid", "unpaid", "payment",
+    "billing", "bill", "fees", "fee", "overdue", "pending",
+    # Doctor attributes
+    "specialization", "specialisation", "department", "specialist",
+    "dermatology", "cardiology", "orthopedics", "pediatrics", "general",
+    # Patient attributes
+    "city", "gender", "male", "female", "registered", "registration",
+    "phone", "email", "name", "date of birth", "dob",
+    # Appointment attributes
+    "scheduled", "completed", "cancelled", "canceled", "no-show", "noshow",
+    "duration", "visit", "visits", "checkup", "check-up",
+    # Time-based
+    "monthly", "month", "weekly", "week", "daily", "day", "trend",
+    "last month", "last quarter", "past", "history", "recent",
+    # Aggregation intent
+    "how many", "count", "total", "average", "avg", "top", "most",
+    "least", "busiest", "highest", "lowest", "maximum", "minimum",
+    "percentage", "percent", "ratio", "breakdown", "distribution",
+    # Action words specific to data
+    "list", "show", "compare", "find", "which", "what",
 ]
 
+
 # ---------------------------------------------------------------------------
-# Comprehensive seed examples — covers all 20 test scenarios
+# Comprehensive seed examples
 # ---------------------------------------------------------------------------
 SEED_EXAMPLES = [
-    # ── Patients ──
+    # ── Patients ──────────────────────────────────────────────────────────
     {
         "question": "How many patients do we have?",
         "sql": "SELECT COUNT(*) AS total_patients FROM patients"
     },
     {
+        "question": "How many patients are there?",
+        "sql": "SELECT COUNT(*) AS total_patients FROM patients"
+    },
+    {
+        "question": "Total number of patients",
+        "sql": "SELECT COUNT(*) AS total_patients FROM patients"
+    },
+    {
         "question": "List all patients from New York",
-        "sql": "SELECT first_name, last_name, email, phone FROM patients WHERE city = 'New York'"
+        "sql": (
+            "SELECT first_name, last_name, email, phone "
+            "FROM patients WHERE city = 'New York' ORDER BY last_name"
+        )
     },
     {
         "question": "How many male and female patients do we have?",
@@ -97,15 +174,53 @@ SEED_EXAMPLES = [
     {
         "question": "Show patient registration trend by month",
         "sql": (
-            "SELECT strftime('%Y-%m', registered_date) AS month, COUNT(*) AS new_patients "
+            "SELECT strftime('%Y-%m', registered_date) AS month, "
+            "COUNT(*) AS new_patients "
             "FROM patients GROUP BY month ORDER BY month"
         )
     },
+    {
+        "question": "List all patients",
+        "sql": (
+            "SELECT first_name, last_name, email, phone, city, gender "
+            "FROM patients ORDER BY last_name"
+        )
+    },
+    {
+        "question": "Show patients by city",
+        "sql": (
+            "SELECT city, COUNT(*) AS patient_count FROM patients "
+            "GROUP BY city ORDER BY patient_count DESC"
+        )
+    },
+    {
+        "question": "How many patients registered this year?",
+        "sql": (
+            "SELECT COUNT(*) AS patients_this_year FROM patients "
+            "WHERE strftime('%Y', registered_date) = strftime('%Y', 'now')"
+        )
+    },
 
-    # ── Doctors ──
+    # ── Doctors ───────────────────────────────────────────────────────────
+    {
+        "question": "How many doctors do we have?",
+        "sql": "SELECT COUNT(*) AS total_doctors FROM doctors"
+    },
+    {
+        "question": "How many doctors are there?",
+        "sql": "SELECT COUNT(*) AS total_doctors FROM doctors"
+    },
+    {
+        "question": "Total number of doctors",
+        "sql": "SELECT COUNT(*) AS total_doctors FROM doctors"
+    },
     {
         "question": "List all doctors and their specializations",
         "sql": "SELECT name, specialization, department FROM doctors ORDER BY name"
+    },
+    {
+        "question": "List all doctors",
+        "sql": "SELECT name, specialization, department, phone FROM doctors ORDER BY name"
     },
     {
         "question": "Which doctor has the most appointments?",
@@ -124,8 +239,19 @@ SEED_EXAMPLES = [
             "FROM doctors GROUP BY specialization ORDER BY doctor_count DESC"
         )
     },
+    {
+        "question": "Show doctors by department",
+        "sql": (
+            "SELECT department, COUNT(*) AS doctor_count "
+            "FROM doctors GROUP BY department ORDER BY doctor_count DESC"
+        )
+    },
 
-    # ── Appointments ──
+    # ── Appointments ──────────────────────────────────────────────────────
+    {
+        "question": "How many appointments do we have?",
+        "sql": "SELECT COUNT(*) AS total_appointments FROM appointments"
+    },
     {
         "question": "Show me appointments for last month",
         "sql": (
@@ -148,9 +274,17 @@ SEED_EXAMPLES = [
         )
     },
     {
+        "question": "How many cancelled appointments are there?",
+        "sql": (
+            "SELECT COUNT(*) AS cancelled_count FROM appointments "
+            "WHERE status = 'Cancelled'"
+        )
+    },
+    {
         "question": "Show monthly appointment count for the past 6 months",
         "sql": (
-            "SELECT strftime('%Y-%m', appointment_date) AS month, COUNT(*) AS total "
+            "SELECT strftime('%Y-%m', appointment_date) AS month, "
+            "COUNT(*) AS total "
             "FROM appointments "
             "WHERE appointment_date >= date('now', '-6 months') "
             "GROUP BY month ORDER BY month"
@@ -159,7 +293,8 @@ SEED_EXAMPLES = [
     {
         "question": "What percentage of appointments are no-shows?",
         "sql": (
-            "SELECT ROUND(100.0 * SUM(CASE WHEN status = 'No-Show' THEN 1 ELSE 0 END) "
+            "SELECT ROUND(100.0 * "
+            "SUM(CASE WHEN status = 'No-Show' THEN 1 ELSE 0 END) "
             "/ COUNT(*), 2) AS no_show_percentage FROM appointments"
         )
     },
@@ -168,8 +303,8 @@ SEED_EXAMPLES = [
         "sql": (
             "SELECT CASE CAST(strftime('%w', appointment_date) AS INTEGER) "
             "WHEN 0 THEN 'Sunday' WHEN 1 THEN 'Monday' WHEN 2 THEN 'Tuesday' "
-            "WHEN 3 THEN 'Wednesday' WHEN 4 THEN 'Thursday' WHEN 5 THEN 'Friday' "
-            "WHEN 6 THEN 'Saturday' END AS day_name, "
+            "WHEN 3 THEN 'Wednesday' WHEN 4 THEN 'Thursday' "
+            "WHEN 5 THEN 'Friday' WHEN 6 THEN 'Saturday' END AS day_name, "
             "COUNT(*) AS total FROM appointments "
             "GROUP BY strftime('%w', appointment_date) ORDER BY total DESC"
         )
@@ -184,8 +319,36 @@ SEED_EXAMPLES = [
             "HAVING visit_count > 3 ORDER BY visit_count DESC"
         )
     },
+    {
+        "question": "Show appointment status breakdown",
+        "sql": (
+            "SELECT status, COUNT(*) AS count FROM appointments "
+            "GROUP BY status ORDER BY count DESC"
+        )
+    },
+    {
+        "question": "How many completed appointments?",
+        "sql": (
+            "SELECT COUNT(*) AS completed_count FROM appointments "
+            "WHERE status = 'Completed'"
+        )
+    },
+    {
+        "question": "How many scheduled appointments?",
+        "sql": (
+            "SELECT COUNT(*) AS scheduled_count FROM appointments "
+            "WHERE status = 'Scheduled'"
+        )
+    },
+    {
+        "question": "How many no-show appointments?",
+        "sql": (
+            "SELECT COUNT(*) AS no_show_count FROM appointments "
+            "WHERE status = 'No-Show'"
+        )
+    },
 
-    # ── Treatments ──
+    # ── Treatments ────────────────────────────────────────────────────────
     {
         "question": "Average treatment cost by specialization",
         "sql": (
@@ -206,16 +369,41 @@ SEED_EXAMPLES = [
             "GROUP BY d.id, d.name ORDER BY avg_duration DESC"
         )
     },
+    {
+        "question": "What treatments are available?",
+        "sql": (
+            "SELECT DISTINCT treatment_name, "
+            "ROUND(AVG(cost), 2) AS avg_cost, "
+            "ROUND(AVG(duration_minutes), 0) AS avg_duration_mins "
+            "FROM treatments GROUP BY treatment_name ORDER BY treatment_name"
+        )
+    },
+    {
+        "question": "Most expensive treatments",
+        "sql": (
+            "SELECT treatment_name, ROUND(AVG(cost), 2) AS avg_cost "
+            "FROM treatments GROUP BY treatment_name "
+            "ORDER BY avg_cost DESC LIMIT 10"
+        )
+    },
+    {
+        "question": "Total treatment cost",
+        "sql": "SELECT ROUND(SUM(cost), 2) AS total_treatment_cost FROM treatments"
+    },
 
-    # ── Financial ──
+    # ── Financial ─────────────────────────────────────────────────────────
     {
         "question": "What is the total revenue?",
-        "sql": "SELECT SUM(total_amount) AS total_revenue FROM invoices"
+        "sql": "SELECT ROUND(SUM(total_amount), 2) AS total_revenue FROM invoices"
+    },
+    {
+        "question": "What is the total revenue collected?",
+        "sql": "SELECT ROUND(SUM(paid_amount), 2) AS total_collected FROM invoices"
     },
     {
         "question": "Show revenue by doctor",
         "sql": (
-            "SELECT d.name, SUM(i.total_amount) AS total_revenue "
+            "SELECT d.name, ROUND(SUM(i.total_amount), 2) AS total_revenue "
             "FROM doctors d "
             "JOIN appointments a ON d.id = a.doctor_id "
             "JOIN invoices i ON a.patient_id = i.patient_id "
@@ -225,7 +413,8 @@ SEED_EXAMPLES = [
     {
         "question": "Top 5 patients by spending",
         "sql": (
-            "SELECT p.first_name, p.last_name, SUM(i.total_amount) AS total_spending "
+            "SELECT p.first_name, p.last_name, "
+            "ROUND(SUM(i.total_amount), 2) AS total_spending "
             "FROM patients p "
             "JOIN invoices i ON p.id = i.patient_id "
             "GROUP BY p.id, p.first_name, p.last_name "
@@ -235,8 +424,8 @@ SEED_EXAMPLES = [
     {
         "question": "Show unpaid invoices",
         "sql": (
-            "SELECT p.first_name, p.last_name, i.total_amount, i.paid_amount, "
-            "i.status, i.invoice_date "
+            "SELECT p.first_name, p.last_name, i.total_amount, "
+            "i.paid_amount, i.status, i.invoice_date "
             "FROM invoices i "
             "JOIN patients p ON p.id = i.patient_id "
             "WHERE i.status IN ('Pending', 'Overdue') "
@@ -258,18 +447,33 @@ SEED_EXAMPLES = [
         "question": "Revenue trend by month",
         "sql": (
             "SELECT strftime('%Y-%m', invoice_date) AS month, "
-            "SUM(total_amount) AS revenue "
+            "ROUND(SUM(total_amount), 2) AS revenue "
             "FROM invoices GROUP BY month ORDER BY month"
         )
     },
     {
         "question": "Compare revenue between departments",
         "sql": (
-            "SELECT d.department, SUM(i.total_amount) AS total_revenue "
+            "SELECT d.department, ROUND(SUM(i.total_amount), 2) AS total_revenue "
             "FROM doctors d "
             "JOIN appointments a ON d.id = a.doctor_id "
             "JOIN invoices i ON a.patient_id = i.patient_id "
             "GROUP BY d.department ORDER BY total_revenue DESC"
+        )
+    },
+    {
+        "question": "Invoice status breakdown",
+        "sql": (
+            "SELECT status, COUNT(*) AS count, "
+            "ROUND(SUM(total_amount), 2) AS total_amount "
+            "FROM invoices GROUP BY status ORDER BY total_amount DESC"
+        )
+    },
+    {
+        "question": "Total outstanding amount",
+        "sql": (
+            "SELECT ROUND(SUM(total_amount - paid_amount), 2) AS outstanding_amount "
+            "FROM invoices WHERE status IN ('Pending', 'Overdue')"
         )
     },
 ]
@@ -289,19 +493,15 @@ class SQLValidator:
     ]
 
     @classmethod
-    def validate(cls, sql: str) -> tuple:
-        """Return (is_valid: bool, error_message: str)."""
+    def validate(cls, sql: str) -> Tuple[bool, str]:
         if not sql or not sql.strip():
             return False, "Empty SQL query"
-
         cleaned = sql.upper().strip()
         if not (cleaned.startswith("SELECT") or cleaned.startswith("WITH")):
             return False, "Only SELECT queries are permitted"
-
         for pattern in cls._BLOCKED:
             if re.search(pattern, sql, re.IGNORECASE):
                 return False, f"Blocked keyword detected: {pattern}"
-
         return True, ""
 
 
@@ -309,7 +509,7 @@ class SQLValidator:
 # Improved Memory Store
 # ---------------------------------------------------------------------------
 class SimpleMemoryStore:
-    """In-memory store with improved similarity scoring."""
+    """In-memory store with cosine similarity scoring."""
 
     STOP_WORDS = {
         "the", "a", "an", "is", "are", "was", "were", "do", "does", "did",
@@ -319,14 +519,13 @@ class SimpleMemoryStore:
         "as", "into", "through", "during", "before", "after", "above",
         "below", "between", "out", "off", "over", "under", "again",
         "further", "then", "once", "here", "there", "when", "where", "why",
-        "how", "all", "each", "every", "both", "few", "more", "most",
-        "other", "some", "such", "no", "nor", "not", "only", "own", "same",
-        "so", "than", "too", "very", "just", "because", "but", "and", "or",
-        "if", "while", "about", "up", "down", "it", "its", "this", "that",
+        "all", "each", "every", "both", "few", "more", "most", "other",
+        "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+        "than", "too", "very", "just", "because", "but", "and", "or", "if",
+        "while", "about", "up", "down", "it", "its", "this", "that",
         "these", "those", "i", "me", "my", "we", "us", "our", "you", "your",
         "he", "him", "his", "she", "her", "they", "them", "their", "what",
-        "which", "who", "whom", "show", "list", "give", "tell", "get",
-        "display", "find", "see",
+        "whom", "give", "tell", "display", "find", "see",
     }
 
     def __init__(self):
@@ -337,71 +536,45 @@ class SimpleMemoryStore:
             if pair["question"].lower().strip() == question.lower().strip():
                 pair["sql"] = sql
                 return
+        for pair in self.qa_pairs:
+            if pair["question"].lower().strip() == question.lower().strip():
+                pair["sql"] = sql
+                return
         self.qa_pairs.append({"question": question, "sql": sql})
 
     def _tokenize(self, text: str) -> List[str]:
         words = re.findall(r'[a-z0-9]+', text.lower())
         return [w for w in words if w not in self.STOP_WORDS and len(w) > 1]
 
+    def _cosine_similarity(self, q1: str, q2: str) -> float:
+        c1 = Counter(self._tokenize(q1))
+        c2 = Counter(self._tokenize(q2))
+        common = set(c1.keys()) & set(c2.keys())
+        if not common:
+            return 0.0
+        numerator = sum(c1[w] * c2[w] for w in common)
+        denom = (math.sqrt(sum(v ** 2 for v in c1.values())) *
+                 math.sqrt(sum(v ** 2 for v in c2.values())))
+        return numerator / denom if denom else 0.0
+
     def search(self, question: str, limit: int = 5) -> List[Dict[str, str]]:
-        q_tokens = self._tokenize(question)
-        if not q_tokens:
-            return self.qa_pairs[:limit]
-
-        q_counter = Counter(q_tokens)
-        scored = []
-
-        for pair in self.qa_pairs:
-            p_tokens = self._tokenize(pair["question"])
-            p_counter = Counter(p_tokens)
-            common = set(q_counter.keys()) & set(p_counter.keys())
-            if not common:
-                continue
-
-            numerator = sum(q_counter[w] * p_counter[w] for w in common)
-            denom_q = math.sqrt(sum(v ** 2 for v in q_counter.values()))
-            denom_p = math.sqrt(sum(v ** 2 for v in p_counter.values()))
-
-            if denom_q == 0 or denom_p == 0:
-                continue
-
-            similarity = numerator / (denom_q * denom_p)
-            scored.append((similarity, pair))
-
+        scored = [
+            (self._cosine_similarity(question, p["question"]), p)
+            for p in self.qa_pairs
+        ]
+        scored = [(s, p) for s, p in scored if s > 0]
         scored.sort(key=lambda x: x[0], reverse=True)
         return [p for _, p in scored[:limit]]
 
-    def search_best(self, question: str, threshold: float = 0.6) -> Optional[Dict[str, str]]:
-        q_tokens = self._tokenize(question)
-        if not q_tokens:
+    def search_best(self, question: str, threshold: float = 0.75) -> Optional[Dict[str, str]]:
+        scored = [
+            (self._cosine_similarity(question, p["question"]), p)
+            for p in self.qa_pairs
+        ]
+        if not scored:
             return None
-
-        q_counter = Counter(q_tokens)
-        best_score = 0.0
-        best_pair = None
-
-        for pair in self.qa_pairs:
-            p_tokens = self._tokenize(pair["question"])
-            p_counter = Counter(p_tokens)
-            common = set(q_counter.keys()) & set(p_counter.keys())
-            if not common:
-                continue
-
-            numerator = sum(q_counter[w] * p_counter[w] for w in common)
-            denom_q = math.sqrt(sum(v ** 2 for v in q_counter.values()))
-            denom_p = math.sqrt(sum(v ** 2 for v in p_counter.values()))
-
-            if denom_q == 0 or denom_p == 0:
-                continue
-
-            similarity = numerator / (denom_q * denom_p)
-            if similarity > best_score:
-                best_score = similarity
-                best_pair = pair
-
-        if best_score >= threshold:
-            return best_pair
-        return None
+        best_score, best_pair = max(scored, key=lambda x: x[0])
+        return best_pair if best_score >= threshold else None
 
     def count(self) -> int:
         return len(self.qa_pairs)
@@ -412,42 +585,42 @@ class SimpleMemoryStore:
 # ---------------------------------------------------------------------------
 class VannaAgent:
     """NL2SQL agent backed by Google Gemini and improved memory."""
+    """NL2SQL agent backed by Google Gemini and improved memory."""
 
+    _SYSTEM = f"""You are an expert SQL assistant for a clinic management system using SQLite.
     _SYSTEM = f"""You are an expert SQL assistant for a clinic management system using SQLite.
 
 {SCHEMA_CONTEXT}
 
-STRICT RULES — follow every single one:
-1. Output ONLY a raw SQLite SELECT query. No markdown, no explanation, no code fences, no comments.
+STRICT RULES:
+1. Output ONLY a raw SQLite SELECT query. No markdown, no explanation, no code fences.
 2. Never use INSERT, UPDATE, DELETE, DROP, ALTER, EXEC, GRANT, REVOKE, SHUTDOWN.
 3. Use proper JOINs when data spans multiple tables.
 4. Always give columns meaningful aliases (AS ...).
-5. Use COUNT/SUM/AVG where the question asks for aggregation or totals.
-6. Add ORDER BY + LIMIT for "top", "most", "busiest" type questions.
-7. Use GROUP BY whenever you aggregate.
-8. For date filtering use SQLite functions: strftime('%Y-%m', col), date('now', '-N months'), etc.
-9. For "last month": WHERE col >= date('now','start of month','-1 month') AND col < date('now','start of month')
-10. For "last quarter": WHERE col >= date('now','-3 months')
-11. For "cancelled": WHERE status = 'Cancelled'
-12. For "no-show": WHERE status = 'No-Show' or use CASE WHEN status = 'No-Show'
-13. For "unpaid"/"overdue": WHERE status IN ('Pending','Overdue') or WHERE status = 'Overdue'
-14. For "busiest day of week": use strftime('%w', appointment_date) to extract day number
-15. For "monthly trend": use strftime('%Y-%m', date_column) and GROUP BY
-16. For "average duration": use AVG(duration_minutes) from treatments table joined through appointments
-17. For "revenue by department": join doctors->appointments->invoices and GROUP BY department
-18. Never access sqlite_master or any system table.
-19. Read the question carefully. Generate SQL that EXACTLY answers THAT question, not a different one.
-20. If reference examples are provided below, use them as guidance but adapt to the actual question asked."""
+5. Use COUNT/SUM/AVG for aggregation questions.
+6. Add ORDER BY + LIMIT for "top", "most", "busiest" questions.
+7. Use GROUP BY whenever you aggregate across groups.
+8. For date filtering: use SQLite date functions.
+9. "last month": WHERE col >= date('now','start of month','-1 month') AND col < date('now','start of month')
+10. "last quarter": WHERE col >= date('now','-3 months')
+11. "cancelled": WHERE status = 'Cancelled'
+12. "no-show": WHERE status = 'No-Show'
+13. "unpaid": WHERE status IN ('Pending','Overdue')
+14. "overdue": WHERE status = 'Overdue'
+15. "busiest day": use strftime('%w', appointment_date)
+16. "monthly trend": use strftime('%Y-%m', date_col) GROUP BY month
+17. "average duration": AVG(duration_minutes) from treatments JOIN appointments
+18. "revenue by department": doctors->appointments->invoices GROUP BY department
+19. Never access sqlite_master or system tables.
+20. "how many X" with no breakdown = SELECT COUNT(*) AS total_X FROM X (no GROUP BY).
+21. Only GROUP BY when question asks for breakdown BY something.
+22. Generate SQL that EXACTLY answers the question asked."""
 
-    # ------------------------------------------------------------------ #
-    # Init                                                                 #
-    # ------------------------------------------------------------------ #
     def __init__(self, db_path: str = DATABASE_PATH):
         self.db_path = db_path
         self.memory = SimpleMemoryStore()
         self._client = None
         self._init_llm()
-
         for ex in SEED_EXAMPLES:
             self.memory.add(ex["question"], ex["sql"])
 
@@ -457,37 +630,40 @@ STRICT RULES — follow every single one:
     def _init_llm(self) -> None:
         api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not api_key:
-            print("Warning: No GOOGLE_API_KEY found. LLM disabled, memory-only mode.")
+            print("Warning: No GOOGLE_API_KEY. LLM disabled — memory-only mode.")
             return
         try:
             from google import genai
             self._client = genai.Client(api_key=api_key)
             print("Gemini LLM initialized successfully")
+            print("Gemini LLM initialized successfully")
         except ImportError:
             print("Warning: google-genai not installed. Run: pip install google-genai")
+            print("Warning: google-genai not installed. Run: pip install google-genai")
         except Exception as exc:
+            print(f"Warning: Gemini init failed: {exc}")
             print(f"Warning: Gemini init failed: {exc}")
 
     # ------------------------------------------------------------------ #
     # Prompt builder                                                        #
     # ------------------------------------------------------------------ #
     def _build_prompt(self, question: str) -> str:
-        similar = self.memory.search(question, limit=5)
+        similar = self.memory.search(question, limit=4)
         parts = [
             f"Question: {question}",
             "",
-            "Generate a single SQLite SELECT query that answers this question.",
+            "Generate a single SQLite SELECT query that answers this question exactly.",
             "",
         ]
         if similar:
-            parts.append("Here are some similar example queries for reference:")
+            parts.append("Similar example queries for reference (adapt, don't copy blindly):")
             parts.append("")
             for i, pair in enumerate(similar, 1):
                 parts.append(f"Example {i}:")
                 parts.append(f"  Q: {pair['question']}")
                 parts.append(f"  SQL: {pair['sql']}")
                 parts.append("")
-        parts.append("Now generate the SQL for the question above. Output ONLY the SQL, nothing else.")
+        parts.append("Output ONLY the SQL query, nothing else.")
         return "\n".join(parts)
 
     # ------------------------------------------------------------------ #
@@ -498,7 +674,6 @@ STRICT RULES — follow every single one:
             return None
         try:
             from google.genai import types as genai_types
-
             response = self._client.models.generate_content(
                 model="gemini-2.0-flash",
                 contents=self._build_prompt(question),
@@ -506,31 +681,30 @@ STRICT RULES — follow every single one:
                     system_instruction=self._SYSTEM,
                     temperature=0.0,
                     max_output_tokens=1024,
+                    temperature=0.0,
+                    max_output_tokens=1024,
                 ),
             )
-
             raw = response.text.strip()
+            # Strip markdown fences
             raw = re.sub(r"^```(?:sql)?\s*", "", raw, flags=re.IGNORECASE)
             raw = re.sub(r"\s*```$", "", raw)
             raw = raw.strip()
-
-            # Strip any explanation text before SELECT/WITH
+            # Extract only the SQL part
             lines = raw.split('\n')
             sql_lines = []
             found_sql = False
             for line in lines:
+                stripped = line.strip().upper()
                 if not found_sql and (
-                    line.strip().upper().startswith('SELECT') or
-                    line.strip().upper().startswith('WITH')
+                    stripped.startswith('SELECT') or
+                    stripped.startswith('WITH')
                 ):
                     found_sql = True
                 if found_sql:
                     sql_lines.append(line)
-            if sql_lines:
-                raw = '\n'.join(sql_lines)
-
-            return raw.strip() if raw else None
-
+            raw = '\n'.join(sql_lines).strip() if sql_lines else raw
+            return raw if raw else None
         except Exception as exc:
             print(f"LLM error: {exc}")
             return None
@@ -539,21 +713,28 @@ STRICT RULES — follow every single one:
     # SQL generation with fallback                                         #
     # ------------------------------------------------------------------ #
     def generate_sql(self, question: str) -> Optional[str]:
+        """Generate SQL: LLM first, then memory fallback."""
+        # 1. Try LLM
         sql = self._call_llm(question)
         if sql:
             valid, _ = SQLValidator.validate(sql)
             if valid:
                 return sql
+            valid, _ = SQLValidator.validate(sql)
+            if valid:
+                return sql
 
-        best = self.memory.search_best(question, threshold=0.7)
+        # 2. High-confidence memory match
+        best = self.memory.search_best(question, threshold=0.75)
         if best:
-            print(f"  [memory fallback] Using cached SQL for: {best['question'][:50]}")
+            print(f"  [memory] High-confidence match: {best['question'][:55]}")
             return best["sql"]
 
-        similar = self.memory.search(question, limit=1)
-        if similar:
-            print(f"  [memory fallback] Best available: {similar[0]['question'][:50]}")
-            return similar[0]["sql"]
+        # 3. Lower threshold fallback
+        best_low = self.memory.search_best(question, threshold=0.5)
+        if best_low:
+            print(f"  [memory] Low-confidence match: {best_low['question'][:55]}")
+            return best_low["sql"]
 
         return None
 
@@ -570,77 +751,82 @@ STRICT RULES — follow every single one:
             columns = [d[0] for d in cursor.description] if cursor.description else []
             rows = [list(row) for row in cursor.fetchall()]
             conn.close()
-            return {"columns": columns, "rows": rows, "row_count": len(rows), "error": None}
+            return {
+                "columns": columns, "rows": rows,
+                "row_count": len(rows), "error": None
+            }
         except Exception as exc:
             return {"error": str(exc), "columns": [], "rows": [], "row_count": 0}
 
-    # ------------------------------------------------------------------ #
-    # FIX 3: Out-of-scope check — correctly indented inside class         #
-    # ------------------------------------------------------------------ #
-    def _is_out_of_scope(self, question: str) -> tuple:
-        """Check if the question is outside the clinic database scope."""
+    def _check_out_of_scope(self, question: str) -> Tuple[bool, str]:
+        """
+        Returns (is_blocked, message).
+        Checks completely out-of-scope topics first,
+        then fields not in the database.
+        """
         q_lower = question.lower().strip()
 
-        for keyword in OUT_OF_SCOPE_KEYWORDS:
-            if keyword in q_lower:
+        # 1. Completely out-of-scope topics
+        for pattern in OUT_OF_SCOPE_PATTERNS:
+            if re.search(pattern, q_lower):
                 return True, (
-                    f"This question contains '{keyword}' which is outside the "
-                    f"scope of the clinic database. The database contains: "
-                    f"patients, doctors, appointments, treatments, and invoices."
+                    "This question is outside the scope of the clinic database. "
+                    "I can only answer questions about patients, doctors, "
+                    "appointments, treatments, and invoices."
                 )
 
-        has_clinic_keyword = any(kw in q_lower for kw in IN_SCOPE_KEYWORDS)
-        if not has_clinic_keyword:
+        # 2. Clinic-related but data not in this database
+        for pattern, reason in NOT_IN_DATABASE_PATTERNS:
+            if re.search(pattern, q_lower):
+                return True, (
+                    f"{reason} "
+                    f"You can ask about: patient demographics, doctor specializations, "
+                    f"appointments, treatment costs/durations, and invoice/revenue data."
+                )
+
+        # 3. Check if it has ANY clinic-related keyword
+        has_clinic_kw = any(kw in q_lower for kw in IN_SCOPE_KEYWORDS)
+        if not has_clinic_kw:
             return True, (
                 "This question doesn't appear to be related to clinic data. "
-                "You can ask about patients, doctors, appointments, treatments, "
-                "and invoices."
+                "I can answer questions about patients, doctors, appointments, "
+                "treatments, and invoices."
             )
 
         return False, ""
 
-    # ------------------------------------------------------------------ #
-    # FIX 4: SQL relevance check — correctly indented inside class        #
-    # ------------------------------------------------------------------ #
-    def _validate_sql_relevance(self, question: str, sql: str) -> tuple:
-        """Check if the generated SQL actually matches the question intent."""
+    def _validate_sql_relevance(self, question: str, sql: str) -> Tuple[bool, str]:
+        """
+        Verify the generated SQL actually addresses the question.
+        Only checks for clear mismatches to avoid false positives.
+        """
         q_lower = question.lower()
         sql_lower = sql.lower()
 
-        relevance_rules = [
-            ("dead",           None,              "Database has no mortality data"),
-            ("died",           None,              "Database has no mortality data"),
-            ("deceased",       None,              "Database has no deceased patient records"),
-            ("doctor",         "doctors",         "Query about doctors must reference the doctors table"),
-            ("appointment",    "appointments",    "Query about appointments must reference appointments table"),
-            ("treatment",      "treatments",      "Query about treatments must reference treatments table"),
-            ("invoice",        "invoices",        "Query about invoices must reference invoices table"),
-            ("revenue",        "invoices",        "Revenue queries must reference the invoices table"),
-            ("specialization", "specialization",  "Query must reference specialization column"),
-            ("duration",       "duration_minutes","Query must reference duration_minutes column"),
-            ("city",           "city",            "Query must reference city column"),
-            ("registered",     "registered_date", "Query must reference registered_date column"),
-            ("department",     "department",      "Query must reference department column"),
-            ("cancelled",      "cancelled",       "Query must filter by cancelled status"),
-            ("overdue",        "overdue",         "Query must filter by overdue status"),
-            ("pending",        "pending",         "Query must filter by pending status"),
-            ("no-show",        "no-show",         "Query must filter by no-show status"),
+        # These are hard rules — if question has keyword, SQL must have table/column
+        strict_rules = [
+            # (question_keyword, required_in_sql, error_description)
+            ("appointment",    "appointments",     "appointments table"),
+            ("treatment",      "treatments",       "treatments table"),
+            ("invoice",        "invoices",         "invoices table"),
+            ("revenue",        "invoices",         "invoices table for revenue"),
+            ("billing",        "invoices",         "invoices table for billing"),
+            ("specialization", "specialization",   "specialization column"),
+            ("duration",       "duration_minutes", "duration_minutes column"),
+            ("registered",     "registered_date",  "registered_date column"),
+            ("cancelled",      "cancelled",        "Cancelled status filter"),
+            ("overdue",        "overdue",          "Overdue status filter"),
+            ("no-show",        "no-show",          "No-Show status filter"),
         ]
 
-        for q_kw, sql_kw, error_msg in relevance_rules:
-            if q_kw in q_lower:
-                if sql_kw is None:
-                    return False, error_msg
-                if sql_kw not in sql_lower:
-                    return False, f"SQL mismatch: {error_msg}"
+        for q_kw, sql_kw, desc in strict_rules:
+            if q_kw in q_lower and sql_kw not in sql_lower:
+                return False, f"Generated SQL is missing {desc}"
 
         return True, ""
 
-    # ------------------------------------------------------------------ #
-    # FIX 5: ask() — correctly indented inside class                      #
-    # ------------------------------------------------------------------ #
     def ask(self, question: str) -> Dict[str, Any]:
-        """End-to-end: question -> scope check -> SQL -> validate -> execute -> response."""
+        """Full pipeline: validate → generate → check → execute → respond."""
         result: Dict[str, Any] = {
             "question": question,
             "sql_query": None,
@@ -651,39 +837,44 @@ STRICT RULES — follow every single one:
             "error": None,
         }
 
-        # Step 1: Out-of-scope check
-        out_of_scope, scope_reason = self._is_out_of_scope(question)
-        if out_of_scope:
+        # Step 1: Scope + data availability check
+        blocked, reason = self._check_out_of_scope(question)
+        if blocked:
             result["error"] = "out_of_scope"
-            result["message"] = f"I cannot answer this question. {scope_reason}"
+            result["message"] = f"I cannot answer this question. {reason}"
             return result
 
         # Step 2: Generate SQL
         sql = self.generate_sql(question)
         if not sql:
-            result["error"] = "Could not generate SQL for this question"
-            result["message"] = "I couldn't understand that question. Please try rephrasing."
+            result["error"] = "no_sql_generated"
+            result["message"] = (
+                "I couldn't generate a query for this question. "
+                "Please try rephrasing or ask about patients, doctors, "
+                "appointments, treatments, or invoices."
+            )
             return result
 
         result["sql_query"] = sql
 
-        # Step 3: Validate SQL safety
+        # Step 3: Safety validation
         is_valid, err = SQLValidator.validate(sql)
         if not is_valid:
             result["error"] = err
-            result["message"] = f"The generated query was blocked: {err}"
+            result["message"] = f"The generated query was blocked for safety: {err}"
             return result
 
-        # Step 4: Validate SQL relevance
+        # Step 4: Relevance check
         is_relevant, relevance_err = self._validate_sql_relevance(question, sql)
         if not is_relevant:
             result["error"] = "irrelevant_sql"
             result["message"] = (
-                f"I cannot answer this question with the available clinic data. "
-                f"Reason: {relevance_err}"
+                f"I couldn't generate an accurate query for this question. "
+                f"Detail: {relevance_err}. Please try rephrasing."
             )
             return result
 
+        # Step 5: Execute
         # Step 5: Execute
         exec_result = self.execute_sql(sql)
         if exec_result.get("error"):
@@ -695,7 +886,7 @@ STRICT RULES — follow every single one:
         result["rows"] = exec_result["rows"]
         result["row_count"] = exec_result["row_count"]
 
-        # Step 6: Summary message
+        # Step 6: Human-readable message
         rc = result["row_count"]
         if rc == 0:
             result["message"] = "No data found for your query."
@@ -704,7 +895,7 @@ STRICT RULES — follow every single one:
         else:
             result["message"] = f"Found {rc} result(s)."
 
-        # Step 7: Save to memory
+        # Step 7: Cache successful query
         self.memory.add(question, sql)
 
         return result
@@ -720,7 +911,7 @@ STRICT RULES — follow every single one:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton
+# Singleton
 # ---------------------------------------------------------------------------
 _agent_instance: Optional[VannaAgent] = None
 
@@ -737,26 +928,45 @@ agent = get_agent()
 
 # ---------------------------------------------------------------------------
 # Smoke test
+# Smoke test
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("\n-- VannaAgent smoke test --")
+    print("\n-- VannaAgent smoke test --")
     a = get_agent()
 
-    test_questions = [
-        "How many patients do we have?",
-        "List all doctors",
-        "What is the total revenue?",
-        "Which doctor has the most appointments?",
-        "Show me appointments for last month",
-        "Average treatment cost by specialization",
-        "how many patients are dead?",       # should be blocked
-        "what is the weather today?",        # should be blocked
+    tests = [
+        # Should PASS (in database)
+        ("How many patients do we have?",           True),
+        ("How many doctors are there?",             True),
+        ("How many appointments do we have?",       True),
+        ("List all doctors",                        True),
+        ("What is the total revenue?",              True),
+        ("Which doctor has the most appointments?", True),
+        ("Show me appointments for last month",     True),
+        ("Average treatment cost by specialization",True),
+        ("Show unpaid invoices",                    True),
+        # Should BLOCK (out of scope)
+        ("how many patients are dead?",             False),
+        ("what is the weather today?",              False),
+        ("show me stock prices",                    False),
+        # Should BLOCK (not in database)
+        ("what is the blood type of patients?",     False),
+        ("show patient insurance details",          False),
+        ("what medications are prescribed?",        False),
     ]
 
-    for q in test_questions:
-        print(f"\nQ: {q}")
-        r = a.ask(q)
-        print(f"   SQL  : {r.get('sql_query', 'N/A')}")
-        print(f"   Msg  : {r.get('message')}")
-        if r.get("error"):
-            print(f"   Error: {r['error']}")
+    passed = 0
+    for question, should_pass in tests:
+        r = a.ask(question)
+        is_error = bool(r.get("error"))
+        ok = (should_pass and not is_error) or (not should_pass and is_error)
+        status = "PASS" if ok else "FAIL"
+        if ok:
+            passed += 1
+        print(f"  [{status}] {question[:55]}")
+        if not ok:
+            print(f"         Expected {'answer' if should_pass else 'block'}, "
+                  f"got: {r.get('message', '')[:80]}")
+
+    print(f"\nSmoke test: {passed}/{len(tests)} passed")
