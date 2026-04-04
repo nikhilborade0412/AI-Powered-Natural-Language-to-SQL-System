@@ -3,9 +3,6 @@ main.py
 
 FastAPI application for the NL2SQL Clinic chatbot.
 Send a plain-English question -> get SQL results + summary back.
-
-Run with:
-    uvicorn main:app --reload --port 8000
 """
 
 import os
