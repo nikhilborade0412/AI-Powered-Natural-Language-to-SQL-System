@@ -5,7 +5,7 @@ Ask questions in plain English and get results from a clinic database — no SQL
 
 ## LLM Provider
 
-This project uses **Google Gemini** (`gemini-2.5-flash`) via `GeminiLlmService`.  
+This project uses **Google Gemini** (`gemini-2.0-flash-exp`) via `GeminiLlmService`.  
 Get a free API key at: https://aistudio.google.com/apikey
 
 ---
@@ -21,6 +21,7 @@ project/
 ├── requirements.txt    # All dependencies
 ├── README.md           # This file
 ├── RESULTS.md          # Test results for 20 questions
+├── .env                # Environment variables (GOOGLE_API_KEY)
 └── clinic.db           # Generated SQLite database
 ```
 
@@ -32,15 +33,31 @@ project/
 
 ```bash
 git clone <your-repo-url>
-cd nl2sql-clinic
+cd "— AIML DeveloperCOGNINEST AI"
 ```
 
-### 2. Create a virtual environment (optional but recommended)
+### 2. Create a virtual environment (recommended)
 
 ```bash
-python -m venv venv
-source venv/bin/activate   # On Windows: venv\Scripts\activate
+python -m venv yenv
 ```
+
+**Activate the virtual environment:**
+
+- **Windows (PowerShell):**
+  ```powershell
+  yenv\Scripts\activate
+  ```
+
+- **Windows (Command Prompt):**
+  ```cmd
+  yenv\Scripts\activate.bat
+  ```
+
+- **macOS/Linux:**
+  ```bash
+  source yenv/bin/activate
+  ```
 
 ### 3. Install dependencies
 
@@ -66,7 +83,10 @@ python setup_database.py
 
 This creates `clinic.db` and prints a summary:
 ```
-Created 200 patients, 15 doctors, 500 appointments...
+Created 200 patients, 15 doctors, 500 appointments, 287 treatments, 300 invoices
+Total billed: $1,585,963.63
+Total collected: $1,074,018.34
+Outstanding: $511,945.29
 ```
 
 ### 6. Seed agent memory
@@ -89,6 +109,10 @@ Or to run everything in one shot (as required):
 pip install -r requirements.txt && python setup_database.py && python seed_memory.py && uvicorn main:app --port 8000
 ```
 
+**Access the API at:** http://localhost:8000
+
+**Interactive API docs:** http://localhost:8000/docs
+
 ---
 
 ## API Documentation
@@ -110,7 +134,13 @@ Ask a question in plain English.
   "message": "Here are the top 5 patients by total spending.",
   "sql_query": "SELECT p.first_name, p.last_name, SUM(i.total_amount) AS total_spending FROM patients p JOIN invoices i ON i.patient_id = p.id GROUP BY p.id ORDER BY total_spending DESC LIMIT 5",
   "columns": ["first_name", "last_name", "total_spending"],
-  "rows": [["Priya", "Sharma", 7240.5], ["Rahul", "Verma", 6890.0]],
+  "rows": [
+    ["Priya", "Sharma", 7240.5],
+    ["Rahul", "Verma", 6890.0],
+    ["John", "Doe", 6543.25],
+    ["Jane", "Smith", 6102.75],
+    ["Michael", "Johnson", 5890.0]
+  ],
   "row_count": 5,
   "chart": null,
   "chart_type": null,
@@ -122,7 +152,12 @@ Ask a question in plain English.
 ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"question": "How many patients do we have?"}'
+  -d "{\"question\": \"How many patients do we have?\"}"
+```
+
+**Example using PowerShell:**
+```powershell
+Invoke-WebRequest -Uri http://localhost:8000/chat -Method POST -Headers @{"Content-Type"="application/json"} -Body '{"question": "How many patients do we have?"}'
 ```
 
 ---
@@ -140,6 +175,11 @@ Check if the API and database are working.
 }
 ```
 
+**Example:**
+```bash
+curl http://localhost:8000/health
+```
+
 ---
 
 ### GET /
@@ -151,6 +191,11 @@ Basic check that the server is running.
 {
   "message": "NL2SQL Clinic API is running. Use POST /chat to ask questions."
 }
+```
+
+**Example:**
+```bash
+curl http://localhost:8000/
 ```
 
 ---
@@ -168,7 +213,7 @@ Input Validation (length, not empty)
         |
         v
 Vanna 2.0 Agent (vanna_setup.py)
-  - GeminiLlmService (Gemini 2.5 Flash)
+  - GeminiLlmService (Gemini 2.0 Flash Exp)
   - RunSqlTool → SqliteRunner → clinic.db
   - VisualizeDataTool (Plotly charts)
   - DemoAgentMemory (learns over time)
@@ -185,19 +230,113 @@ Parse response → JSON returned to user
 ## Database Schema
 
 The clinic database has 5 tables:
-- **patients** — 200 patients across 10 cities
-- **doctors** — 15 doctors across 5 specializations
-- **appointments** — 500 appointments over the past 12 months
-- **treatments** — 350 treatments linked to completed appointments
-- **invoices** — 300 invoices with mixed payment statuses
+
+### **patients**
+- `id` (Primary Key)
+- `first_name`, `last_name`
+- `date_of_birth`, `gender`
+- `phone`, `email`
+- `address`, `city`, `state`, `zip_code`
+
+### **doctors**
+- `id` (Primary Key)
+- `first_name`, `last_name`
+- `specialization`
+- `phone`, `email`
+
+### **appointments**
+- `id` (Primary Key)
+- `patient_id` (Foreign Key → patients)
+- `doctor_id` (Foreign Key → doctors)
+- `appointment_date`, `appointment_time`
+- `status` (Scheduled, Completed, Cancelled, No-Show)
+- `notes`
+
+### **treatments**
+- `id` (Primary Key)
+- `appointment_id` (Foreign Key → appointments)
+- `treatment_name`, `description`
+- `cost`
+
+### **invoices**
+- `id` (Primary Key)
+- `patient_id` (Foreign Key → patients)
+- `appointment_id` (Foreign Key → appointments, nullable)
+- `invoice_date`, `due_date`
+- `total_amount`, `paid_amount`
+- `status` (Paid, Pending, Overdue)
 
 ---
 
-## What I Would Improve With More Time
+## Sample Questions You Can Ask
 
-- Switch from `DemoAgentMemory` (in-memory) to `ChromaAgentMemory` (persistent) so memory survives restarts
-- Add proper JWT authentication in `DefaultUserResolver` instead of a single shared user
-- Add rate limiting to the `/chat` endpoint to prevent abuse
-- Add a caching layer so repeated questions don't hit the LLM again
-- Better chart generation — currently Plotly charts are returned when the agent decides to use `VisualizeDataTool`, but I'd add logic to always generate a chart when the result has numeric data
-- Add structured logging so it's easier to debug issues in production
+- "How many patients do we have?"
+- "Show me the top 5 patients by total spending"
+- "Which doctor has the most appointments?"
+- "What's the total revenue from completed appointments?"
+- "List all overdue invoices"
+- "Show me patients from San Jose"
+- "How many appointments were cancelled?"
+- "What's the average treatment cost?"
+- "Show me all cardiologists"
+- "Which cities have the most patients?"
+
+---
+
+## Database Summary (After Setup)
+
+```
+=======================================================
+DATABASE SUMMARY
+=======================================================
+  Patients       :   200 records
+  Doctors        :    15 records
+  Appointments   :   500 records
+  Treatments     :   287 records
+  Invoices       :   300 records
+
+  APPOINTMENT STATUS:
+    Completed   : 287
+    Scheduled   : 105
+    Cancelled   : 74
+    No-Show     : 34
+
+  INVOICE STATUS:
+    Paid      : 180 invoices  $  939,846.55
+    Pending   :  66 invoices  $  360,133.48
+    Overdue   :  54 invoices  $  285,983.60
+
+  TOP 5 CITIES BY PATIENT COUNT:
+    San Jose            : 33 patients
+    Los Angeles         : 30 patients
+    San Diego           : 25 patients
+    New York            : 21 patients
+    Philadelphia        : 18 patients
+
+  REVENUE SUMMARY:
+    Total billed   : $1,585,963.63
+    Total collected: $1,074,018.34
+    Outstanding    : $  511,945.29
+=======================================================
+```
+
+---
+
+## Troubleshooting
+
+### Issue: `ModuleNotFoundError: No module named 'vanna'`
+**Solution:** Make sure you've activated the virtual environment and run `pip install -r requirements.txt`
+
+### Issue: Database not found
+**Solution:** Run `python setup_database.py` to create `clinic.db`
+
+### Issue: API returns "Agent not initialized"
+**Solution:** Make sure `seed_memory.py` ran successfully before starting the server
+
+### Issue: Google API key errors
+**Solution:** 
+1. Check that `.env` file exists and contains `GOOGLE_API_KEY=...`
+2. Verify the API key is valid at https://aistudio.google.com/apikey
+3. Ensure you have quota remaining on your Gemini API account
+
+---
